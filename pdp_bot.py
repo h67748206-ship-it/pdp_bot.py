@@ -24,6 +24,8 @@ import html
 import random
 import asyncio
 
+from urllib.parse import quote
+
 import aiohttp
 from aiohttp import web
 import discord
@@ -49,6 +51,11 @@ QUERIES = [
     "pdp discord",
     "pdp dark",
     "matching pfp",
+]
+
+# Boards Pinterest PUBLICS (fiable à 100%) : colle les liens de boards de pdp ici
+# ex: "https://www.pinterest.com/pseudo/nom-du-board/"
+BOARDS = [
 ]
 
 INTERVAL_MIN = 10      # toutes les X minutes
@@ -99,29 +106,100 @@ stats = {
 
 
 # ---------- Pinterest ----------
-async def fetch_pins(session: aiohttp.ClientSession, query: str) -> list[str]:
-    """Récupère des URLs d'images Pinterest pour une recherche."""
-    url = "https://www.pinterest.com/search/pins/"
+API_URL = "https://www.pinterest.com/resource/BaseSearchResource/get/"
+
+
+def to_items(urls) -> list[str]:
+    """Transforme des URLs en 'identifiant|url' sans doublons (taille 736x)."""
+    results = {}
+    for u in urls:
+        hd = re.sub(r"/(?:\d+x|originals)/", "/736x/", u)
+        key = hd.rsplit("/", 1)[-1]
+        results[key] = hd
+    return [f"{k}|{v}" for k, v in results.items()]
+
+
+def parse_search_json(js: dict) -> list[str]:
+    """Sort les URLs d'images de la réponse JSON de la recherche Pinterest."""
+    results = js.get("resource_response", {}).get("data", {}).get("results", []) or []
+    urls = []
+    for pin in results:
+        if not isinstance(pin, dict):
+            continue
+        images = pin.get("images") or {}
+        img = images.get("736x") or images.get("474x") or images.get("orig") or images.get("236x")
+        if isinstance(img, dict) and IMG_RE.fullmatch(img.get("url", "")):
+            urls.append(img["url"])
+    return urls
+
+
+async def fetch_search(session: aiohttp.ClientSession, query: str) -> list[str]:
+    """Recherche Pinterest via leur API interne (retourne du JSON)."""
+    data = {
+        "options": {
+            "query": query,
+            "scope": "pins",
+            "page_size": 50,
+            "bookmarks": [],
+            "field_set_key": "unauth_react",
+            "no_fetch_context_on_resource": False,
+        },
+        "context": {},
+    }
+    params = {
+        "source_url": f"/search/pins/?q={quote(query)}&rs=typed",
+        "data": json.dumps(data),
+        "_": str(int(time.time() * 1000)),
+    }
+    headers = {
+        **HEADERS,
+        "Accept": "application/json, text/javascript, */*, q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "X-Pinterest-AppState": "active",
+        "X-Pinterest-PWS-Handler": "www/search/[scope].js",
+        "Referer": "https://www.pinterest.com/",
+    }
     try:
         async with session.get(
-            url, params={"q": query}, headers=HEADERS,
+            API_URL, params=params, headers=headers,
             timeout=aiohttp.ClientTimeout(total=20),
         ) as r:
             if r.status != 200:
-                print(f"[Pinterest] statut {r.status} pour '{query}'")
+                print(f"[Pinterest] recherche '{query}' -> statut {r.status}")
                 return []
-            html = await r.text()
+            js = await r.json(content_type=None)
     except Exception as e:
-        print(f"[Pinterest] erreur : {e}")
+        print(f"[Pinterest] erreur recherche : {e}")
         return []
+    return parse_search_json(js)
 
-    results = {}
-    for u in IMG_RE.findall(html):
-        # on prend la version 736x (bonne qualité, toujours dispo)
-        hd = re.sub(r"/(?:\d+x|originals)/", "/736x/", u)
-        key = hd.rsplit("/", 1)[-1]  # nom du fichier = identifiant unique
-        results[key] = hd
-    return [f"{k}|{v}" for k, v in results.items()]
+
+async def fetch_board(session: aiohttp.ClientSession, board_url: str) -> list[str]:
+    """Lit un board public via son flux RSS."""
+    url = board_url.split("?")[0].rstrip("/")
+    if not url.endswith(".rss"):
+        url += ".rss"
+    try:
+        async with session.get(
+            url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)
+        ) as r:
+            if r.status != 200:
+                print(f"[Pinterest] board {url} -> statut {r.status}")
+                return []
+            text = await r.text()
+    except Exception as e:
+        print(f"[Pinterest] erreur board : {e}")
+        return []
+    return IMG_RE.findall(text)
+
+
+async def fetch_pins(session: aiohttp.ClientSession, source: str) -> list[str]:
+    """source = lien de board (http...) ou mot de recherche."""
+    if source.startswith("http"):
+        urls = await fetch_board(session, source)
+    else:
+        urls = await fetch_search(session, source)
+    return to_items(urls)
 
 
 SIZES = ["736x", "564x", "474x", "originals", "236x"]
@@ -193,11 +271,12 @@ async def send_pics(session: aiohttp.ClientSession, candidates, query: str, amou
     return len(files)
 
 
-async def run_once(session: aiohttp.ClientSession, query: str | None = None) -> tuple[int, str]:
-    query = query or random.choice(QUERIES)
-    candidates = await get_new_pics(session, query)
-    sent = await send_pics(session, candidates, query, min(PICS_PER_POST, 10))
-    return sent, query
+async def run_once(session: aiohttp.ClientSession, source: str | None = None) -> tuple[int, str]:
+    source = source or random.choice(QUERIES + BOARDS)
+    label = source.split("?")[0].rstrip("/").rsplit("/", 1)[-1] if source.startswith("http") else source
+    candidates = await get_new_pics(session, source)
+    sent = await send_pics(session, candidates, label, min(PICS_PER_POST, 10))
+    return sent, label
 
 
 # ---------- Mini site web (pour Render) ----------
