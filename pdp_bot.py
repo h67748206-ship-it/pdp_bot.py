@@ -16,6 +16,7 @@ Variables d'environnement (.env ou Render) :
 """
 
 import os
+import io
 import re
 import json
 import time
@@ -123,44 +124,79 @@ async def fetch_pins(session: aiohttp.ClientSession, query: str) -> list[str]:
     return [f"{k}|{v}" for k, v in results.items()]
 
 
-async def get_new_pics(session: aiohttp.ClientSession, query: str, amount: int):
+SIZES = ["736x", "564x", "474x", "originals", "236x"]
+MAX_BYTES = 7_000_000
+
+
+async def get_new_pics(session: aiohttp.ClientSession, query: str):
     raw = await fetch_pins(session, query)
+    print(f"[Pinterest] {len(raw)} images trouvées pour '{query}'")
     fresh = []
     for item in raw:
         key, url = item.split("|", 1)
         if key not in seen_images:
             fresh.append((key, url))
     random.shuffle(fresh)
-    return fresh[:amount]
+    return fresh
+
+
+async def download_image(session: aiohttp.ClientSession, url: str):
+    """Télécharge l'image (en essayant plusieurs tailles). Retourne (url, bytes) ou None."""
+    base = re.sub(r"/(?:\d+x|originals)/", "/@@/", url)
+    headers = {**HEADERS, "Referer": "https://www.pinterest.com/"}
+    for size in SIZES:
+        candidate = base.replace("@@", size)
+        try:
+            async with session.get(
+                candidate, headers=headers, timeout=aiohttp.ClientTimeout(total=20)
+            ) as r:
+                if r.status != 200 or not r.content_type.startswith("image/"):
+                    continue
+                data = await r.read()
+                if 0 < len(data) <= MAX_BYTES:
+                    return candidate, data
+        except Exception as e:
+            print(f"[Image] erreur : {e}")
+    print(f"[Image] impossible de télécharger {url}")
+    return None
 
 
 # ---------- Envoi webhook ----------
-async def send_pics(session: aiohttp.ClientSession, pics, query: str) -> int:
-    if not pics:
-        return 0
-    webhook = discord.Webhook.from_url(WEBHOOK_URL, session=session)
-    embeds = []
-    for _, url in pics:
+async def send_pics(session: aiohttp.ClientSession, candidates, query: str, amount: int) -> int:
+    files, embeds, shown = [], [], []
+    for key, url in candidates[:40]:
+        if len(files) >= amount:
+            break
+        seen_images.add(key)  # même si ça rate, on ne réessaie pas la même
+        got = await download_image(session, url)
+        if not got:
+            continue
+        used_url, data = got
+        files.append(discord.File(io.BytesIO(data), filename=key))
         e = discord.Embed(color=EMBED_COLOR)
-        e.set_image(url=url)
+        e.set_image(url=f"attachment://{key}")
         embeds.append(e)
-    embeds[0].title = f"📌 {query}"
-    await webhook.send(embeds=embeds, username=WEBHOOK_NAME)
-    for key, _ in pics:
-        seen_images.add(key)
+        shown.append(used_url)
     save_seen(seen_images)
 
-    stats["total_sent"] += len(pics)
+    if not files:
+        return 0
+
+    embeds[0].title = f"📌 {query}"
+    webhook = discord.Webhook.from_url(WEBHOOK_URL, session=session)
+    await webhook.send(embeds=embeds, files=files, username=WEBHOOK_NAME)
+
+    stats["total_sent"] += len(files)
     stats["last_post"] = time.time()
     stats["last_query"] = query
-    stats["recent"] = ([u for _, u in pics] + stats["recent"])[:24]
-    return len(pics)
+    stats["recent"] = (shown + stats["recent"])[:24]
+    return len(files)
 
 
 async def run_once(session: aiohttp.ClientSession, query: str | None = None) -> tuple[int, str]:
     query = query or random.choice(QUERIES)
-    pics = await get_new_pics(session, query, min(PICS_PER_POST, 10))
-    sent = await send_pics(session, pics, query)
+    candidates = await get_new_pics(session, query)
+    sent = await send_pics(session, candidates, query, min(PICS_PER_POST, 10))
     return sent, query
 
 
