@@ -6,6 +6,9 @@ Bot PDP Pinterest -> Webhook Discord
 - Il garde en mémoire les images déjà postées (seen.json) pour pas faire de doublons
 - Commande slash /pdp pour en poster direct (réservée à ceux qui ont "Gérer le serveur")
 - Commande /salon pour choisir le salon où le bot envoie les pdp
+- Commande /leave (réservée à TOI) : le bot quitte le serveur où tu la tapes
+- Sécurité : si TOI (OWNER_ID) tu perds "Gérer le serveur" sur un serveur (ou si tu en pars),
+  le bot quitte tout seul ce serveur
 - Mini site web intégré (pour Render) :
     /        -> page de stats + galerie des dernières pdp
     /health  -> répond "ok" (pour cron-job.org)
@@ -13,6 +16,7 @@ Bot PDP Pinterest -> Webhook Discord
 Variables d'environnement (.env ou Render) :
     DISCORD_TOKEN = token du bot
     WEBHOOK_URL   = (optionnel) webhook par défaut, utilisé tant que /salon n'a pas été fait
+    OWNER_ID      = (optionnel) ton ID Discord, déjà mis par défaut dans le code
     PORT          = donné automatiquement par Render (8080 par défaut en local)
 """
 
@@ -42,6 +46,7 @@ except ImportError:
 # ================= CONFIG =================
 TOKEN = os.getenv("DISCORD_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+OWNER_ID = int(os.getenv("OWNER_ID") or 1535245254209577060)  # ton ID Discord
 
 # Recherches Pinterest utilisées (une est choisie au hasard à chaque tour)
 QUERIES = [
@@ -408,6 +413,7 @@ class PdpBot(discord.Client):
         self.web_runner = await start_web()  # d'abord le site, Render détecte le port
         await self.tree.sync()
         auto_post.start()
+        guard.start()
 
     async def close(self):
         if self.web_runner:
@@ -494,9 +500,83 @@ async def pdp(interaction: discord.Interaction, recherche: str | None = None):
         )
 
 
+@bot.tree.command(name="leave", description="Faire quitter ce serveur au bot (réservé au propriétaire du bot)")
+@app_commands.guild_only()
+async def leave(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message(
+            "❌ Tu n'as pas le droit d'utiliser cette commande.", ephemeral=True
+        )
+        return
+    await interaction.response.send_message("👋 Je quitte le serveur.", ephemeral=True)
+    await interaction.guild.leave()
+
+
+# ---------- Sécurité : le bot part si TOI tu perds tes perms ----------
+async def owner_still_allowed(guild: discord.Guild):
+    """True = ok / False = le bot doit partir / None = impossible de savoir (on ne fait rien)."""
+    if guild.owner_id == OWNER_ID:
+        return True
+    try:
+        member = await guild.fetch_member(OWNER_ID)
+    except discord.NotFound:
+        return False  # tu n'es plus sur le serveur
+    except discord.HTTPException:
+        return None   # erreur Discord, on ne quitte pas par erreur
+    perms = member.guild_permissions
+    return perms.administrator or perms.manage_guild
+
+
+async def check_guild(guild: discord.Guild):
+    if not OWNER_ID:
+        return
+    if await owner_still_allowed(guild) is False:
+        print(f"[Sécurité] tu n'as plus les perms sur '{guild.name}' -> je quitte")
+        try:
+            await guild.leave()
+        except discord.HTTPException as e:
+            print(f"[Sécurité] impossible de quitter : {e}")
+
+
+@tasks.loop(minutes=3)
+async def guard():
+    for guild in list(bot.guilds):
+        await check_guild(guild)
+        await asyncio.sleep(1)
+
+
+@guard.before_loop
+async def before_guard():
+    await bot.wait_until_ready()
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    await check_guild(guild)
+
+
+@bot.event
+async def on_guild_role_update(before: discord.Role, after: discord.Role):
+    await check_guild(after.guild)
+
+
+@bot.event
+async def on_guild_role_delete(role: discord.Role):
+    await check_guild(role.guild)
+
+
+@bot.event
+async def on_guild_remove(guild: discord.Guild):
+    # on oublie le salon choisi pour ce serveur
+    if config.get("guilds", {}).pop(str(guild.id), None):
+        save_config(config)
+
+
 @bot.event
 async def on_ready():
     print(f"Connecté en tant que {bot.user} — auto-post toutes les {INTERVAL_MIN} min")
+    if not OWNER_ID:
+        print("[Sécurité] OWNER_ID non défini -> le bot ne quittera aucun serveur")
 
 
 if __name__ == "__main__":
