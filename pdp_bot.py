@@ -7,6 +7,7 @@ Bot PDP Pinterest -> Webhook Discord
 - Commande slash /pdp pour en poster direct (réservée à ceux qui ont "Gérer le serveur")
 - Commande /salon pour choisir le salon où le bot envoie les pdp
 - Commande /leave (réservée à TOI) : le bot quitte le serveur où tu la tapes
+- Commande /leaveall (réservée à TOI) : le bot quitte TOUS ses serveurs (avec confirmation)
 - Sécurité : si TOI (OWNER_ID) tu perds "Gérer le serveur" sur un serveur (ou si tu en pars),
   le bot quitte tout seul ce serveur
 - Mini site web intégré (pour Render) :
@@ -510,6 +511,51 @@ async def leave(interaction: discord.Interaction):
         return
     await interaction.response.send_message("👋 Je quitte le serveur.", ephemeral=True)
     await interaction.guild.leave()
+
+
+class ConfirmLeaveAll(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=30)
+
+    @discord.ui.button(label="Oui, quitter tous les serveurs", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != OWNER_ID:
+            await interaction.response.send_message("❌ Pas pour toi.", ephemeral=True)
+            return
+        self.stop()
+        guilds = list(bot.guilds)
+        await interaction.response.edit_message(
+            content=f"👋 Je quitte {len(guilds)} serveur(s)...", view=None
+        )
+        for g in guilds:
+            try:
+                await g.leave()
+                print(f"[LeaveAll] quitté '{g.name}'")
+            except discord.HTTPException as e:
+                print(f"[LeaveAll] impossible de quitter '{g.name}' : {e}")
+            await asyncio.sleep(1)
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != OWNER_ID:
+            await interaction.response.send_message("❌ Pas pour toi.", ephemeral=True)
+            return
+        self.stop()
+        await interaction.response.edit_message(content="Annulé ✅", view=None)
+
+
+@bot.tree.command(name="leaveall", description="Faire quitter TOUS les serveurs au bot (réservé au propriétaire du bot)")
+async def leaveall(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message(
+            "❌ Tu n'as pas le droit d'utiliser cette commande.", ephemeral=True
+        )
+        return
+    await interaction.response.send_message(
+        f"⚠️ Le bot est sur **{len(bot.guilds)}** serveur(s). Tout quitter ?",
+        view=ConfirmLeaveAll(),
+        ephemeral=True,
+    )
 
 
 # ---------- Sécurité : le bot part si TOI tu perds tes perms ----------
