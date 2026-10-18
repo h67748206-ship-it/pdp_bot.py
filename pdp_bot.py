@@ -5,13 +5,14 @@ Bot PDP Pinterest -> Webhook Discord
 - Il les envoie dans ton salon via un webhook (embeds avec l'image)
 - Il garde en mémoire les images déjà postées (seen.json) pour pas faire de doublons
 - Commande slash /pdp pour en poster direct (réservée à ceux qui ont "Gérer le serveur")
+- Commande /salon pour choisir le salon où le bot envoie les pdp
 - Mini site web intégré (pour Render) :
     /        -> page de stats + galerie des dernières pdp
     /health  -> répond "ok" (pour cron-job.org)
 
 Variables d'environnement (.env ou Render) :
     DISCORD_TOKEN = token du bot
-    WEBHOOK_URL   = URL du webhook du salon où poster les pdp
+    WEBHOOK_URL   = (optionnel) webhook par défaut, utilisé tant que /salon n'a pas été fait
     PORT          = donné automatiquement par Render (8080 par défaut en local)
 """
 
@@ -63,6 +64,7 @@ PICS_PER_POST = 5      # nombre de pdp par envoi (max 10)
 EMBED_COLOR = 0x2B2D31
 WEBHOOK_NAME = "PDP Bot"
 SEEN_FILE = "seen.json"
+CONFIG_FILE = "config.json"
 # ==========================================
 
 HEADERS = {
@@ -95,6 +97,36 @@ def save_seen(seen: set):
 
 
 seen_images = load_seen()
+
+
+# ---------- salons choisis avec /salon ----------
+def load_config() -> dict:
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"guilds": {}}
+
+
+def save_config(cfg: dict):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+
+
+config = load_config()
+
+
+def get_targets() -> list[str]:
+    """Tous les webhooks où le bot doit poster."""
+    urls = [v["webhook"] for v in config.get("guilds", {}).values()]
+    if WEBHOOK_URL and WEBHOOK_URL not in urls:
+        urls.append(WEBHOOK_URL)
+    return urls
+
+
+def target_for_guild(guild_id) -> str | None:
+    entry = config.get("guilds", {}).get(str(guild_id))
+    return entry["webhook"] if entry else WEBHOOK_URL
 
 # stats affichées sur le mini site
 stats = {
@@ -240,7 +272,7 @@ async def download_image(session: aiohttp.ClientSession, url: str):
 
 
 # ---------- Envoi webhook ----------
-async def send_pics(session: aiohttp.ClientSession, candidates, query: str, amount: int) -> int:
+async def send_pics(session: aiohttp.ClientSession, candidates, query: str, amount: int, webhook_url: str) -> int:
     files, embeds, shown = [], [], []
     for key, url in candidates[:40]:
         if len(files) >= amount:
@@ -261,7 +293,7 @@ async def send_pics(session: aiohttp.ClientSession, candidates, query: str, amou
         return 0
 
     embeds[0].title = f"📌 {query}"
-    webhook = discord.Webhook.from_url(WEBHOOK_URL, session=session)
+    webhook = discord.Webhook.from_url(webhook_url, session=session)
     await webhook.send(embeds=embeds, files=files, username=WEBHOOK_NAME)
 
     stats["total_sent"] += len(files)
@@ -271,11 +303,11 @@ async def send_pics(session: aiohttp.ClientSession, candidates, query: str, amou
     return len(files)
 
 
-async def run_once(session: aiohttp.ClientSession, source: str | None = None) -> tuple[int, str]:
+async def run_once(session: aiohttp.ClientSession, source: str | None, webhook_url: str) -> tuple[int, str]:
     source = source or random.choice(QUERIES + BOARDS)
     label = source.split("?")[0].rstrip("/").rsplit("/", 1)[-1] if source.startswith("http") else source
     candidates = await get_new_pics(session, source)
-    sent = await send_pics(session, candidates, label, min(PICS_PER_POST, 10))
+    sent = await send_pics(session, candidates, label, min(PICS_PER_POST, 10), webhook_url)
     return sent, label
 
 
@@ -390,11 +422,16 @@ bot = PdpBot()
 
 @tasks.loop(minutes=INTERVAL_MIN)
 async def auto_post():
-    try:
-        sent, query = await run_once(bot.session)
-        print(f"[Auto] {sent} pdp envoyées ('{query}')")
-    except Exception as e:
-        print(f"[Auto] erreur : {e}")
+    targets = get_targets()
+    if not targets:
+        print("[Auto] aucun salon configuré (fais /salon)")
+        return
+    for url in targets:
+        try:
+            sent, label = await run_once(bot.session, None, url)
+            print(f"[Auto] {sent} pdp envoyées ('{label}')")
+        except Exception as e:
+            print(f"[Auto] erreur : {e}")
 
 
 @auto_post.before_loop
@@ -402,14 +439,54 @@ async def before_auto():
     await bot.wait_until_ready()
 
 
+@bot.tree.command(name="salon", description="Choisir le salon où le bot envoie les pdp")
+@app_commands.describe(salon="Le salon où poster les pdp")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+async def salon(interaction: discord.Interaction, salon: discord.TextChannel):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        hooks = await salon.webhooks()
+        hook = next(
+            (h for h in hooks if h.user and h.user.id == bot.user.id and h.token), None
+        )
+        if hook is None:
+            hook = await salon.create_webhook(name=WEBHOOK_NAME)
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ Il me manque la permission **Gérer les webhooks** dans ce salon.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Erreur Discord : {e}", ephemeral=True)
+        return
+
+    config.setdefault("guilds", {})[str(interaction.guild_id)] = {
+        "channel_id": salon.id,
+        "webhook": hook.url,
+    }
+    save_config(config)
+    await interaction.followup.send(
+        f"✅ Les pdp seront envoyées dans {salon.mention}.", ephemeral=True
+    )
+
+
 @bot.tree.command(name="pdp", description="Poster des pdp Pinterest maintenant")
-@app_commands.describe(recherche="Ce que tu veux chercher (ex: pdp anime)")
+@app_commands.describe(recherche="Ce que tu veux chercher (ex: pdp anime) ou un lien de board")
+@app_commands.guild_only()
 @app_commands.default_permissions(manage_guild=True)
 async def pdp(interaction: discord.Interaction, recherche: str | None = None):
+    url = target_for_guild(interaction.guild_id)
+    if not url:
+        await interaction.response.send_message(
+            "❌ Choisis d'abord un salon avec `/salon`.", ephemeral=True
+        )
+        return
     await interaction.response.defer(ephemeral=True)
-    sent, query = await run_once(bot.session, recherche)
+    sent, label = await run_once(bot.session, recherche, url)
     if sent:
-        await interaction.followup.send(f"✅ {sent} pdp envoyées ('{query}').", ephemeral=True)
+        await interaction.followup.send(f"✅ {sent} pdp envoyées ('{label}').", ephemeral=True)
     else:
         await interaction.followup.send(
             "❌ Rien trouvé (Pinterest a peut-être bloqué ou plus de nouvelles images). Réessaie.",
@@ -423,6 +500,6 @@ async def on_ready():
 
 
 if __name__ == "__main__":
-    if not TOKEN or not WEBHOOK_URL:
-        raise SystemExit("Il manque DISCORD_TOKEN ou WEBHOOK_URL dans les variables d'environnement.")
+    if not TOKEN:
+        raise SystemExit("Il manque DISCORD_TOKEN dans les variables d'environnement.")
     bot.run(TOKEN)
