@@ -15,12 +15,14 @@ etat = {"nom": "VoiceMaster", "statut": "démarrage..."}
 COMMANDES = [
     ("Tout le monde", [
         ("=panneau", "Réafficher le panneau de gestion de ton salon."),
+        ("=help", "Afficher cette aide."),
     ]),
     ("Whitelist", [
         ("=setup <id>", "Définir le salon générateur."),
         ("=find @m", "Trouver quelqu'un en vocal."),
         ("=bringall", "Ramener tout le monde dans ton vocal."),
         ("=bringcc <cat> <cat>", "Répartir les vocaux d'une catégorie dans une autre."),
+        ("=wakeup @m", "Faire visiter tous les vocaux à un membre puis le ramener."),
     ]),
     ("Outils vocaux", [
         ("=mv @m", "Ramener un membre dans TON vocal."),
@@ -110,6 +112,7 @@ TOKEN = os.environ["DISCORD_TOKEN"]
 BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "0"))
 DATA_FILE = Path("data.json")
 DELAI = 0.5
+DELAI_WAKEUP = 1.0
 
 NIVEAUX_PAR_DEFAUT = {
     "panneau": "all",
@@ -121,9 +124,11 @@ NIVEAUX_PAR_DEFAUT = {
     "join": "wl",
     "follow": "wl",
     "unfollow": "wl",
+    "wakeup": "wl",
 }
 
 suivis: dict[int, int] = {}
+wakeup_en_cours: set[int] = set()
 
 
 def charger() -> dict:
@@ -327,7 +332,7 @@ class Panneau(discord.ui.View):
             await interaction.response.send_modal(RenommerModal(self.salon_id))
 
 
-# ---------- Commandes : tout le monde ----------
+# ---------- Commande : tout le monde ----------
 @bot.command(name="panneau")
 @requis("panneau")
 async def panneau(ctx):
@@ -343,6 +348,25 @@ async def panneau(ctx):
         color=0x33C6FF,
     )
     await ctx.send(embed=embed, view=Panneau(salon.id, proprio))
+
+
+@bot.command(name="help")
+async def help_cmd(ctx):
+    embed = discord.Embed(
+        title="VoiceMaster · aide",
+        description=f"Préfixe : `{data['prefix']}`",
+        color=0x33C6FF,
+    )
+    for titre, lignes in COMMANDES:
+        embed.add_field(
+            name=titre,
+            value="\n".join(f"`{cmd}` : {desc}" for cmd, desc in lignes),
+            inline=False,
+        )
+    base_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if base_url:
+        embed.set_image(url=f"{base_url}/static/aide.png")
+    await ctx.send(embed=embed)
 
 
 # ---------- Commandes : whitelist ----------
@@ -398,6 +422,42 @@ async def bringcc(ctx, source: discord.CategoryChannel, cible: discord.CategoryC
         except discord.HTTPException:
             pass
     await ctx.send(f"{len(membres)} membre(s) réparti(s) sur {len(salons_cible)} salon(s).")
+
+
+@bot.command(name="wakeup")
+@requis("wakeup")
+async def wakeup(ctx, membre: discord.Member = None):
+    if membre is None:
+        return await ctx.send(f"Usage : `{data['prefix']}wakeup @membre`")
+    if not membre.voice or not membre.voice.channel:
+        return await ctx.send(f"{membre.display_name} n'est pas en vocal.")
+    if membre.id in wakeup_en_cours:
+        return await ctx.send(f"Un wakeup est déjà en cours pour {membre.display_name}.")
+
+    origine = membre.voice.channel
+    wakeup_en_cours.add(membre.id)
+    try:
+        # Visite de tous les salons vocaux du serveur
+        for salon in ctx.guild.voice_channels:
+            if not membre.voice or not membre.voice.channel:
+                break  # le membre s'est déconnecté
+            try:
+                await membre.move_to(salon)
+            except discord.HTTPException:
+                continue  # salon inaccessible : on passe
+            await asyncio.sleep(DELAI_WAKEUP)
+
+        # Retour au salon d'origine
+        if membre.voice and membre.voice.channel:
+            retour = ctx.guild.get_channel(origine.id)
+            if retour:
+                await membre.move_to(retour)
+
+        await ctx.send(f"Wakeup terminé pour {membre.mention} ✅")
+    except discord.Forbidden:
+        await ctx.send("Je n'ai pas la permission de déplacer ce membre.")
+    finally:
+        wakeup_en_cours.discard(membre.id)
 
 
 # ---------- Commandes : outils vocaux ----------
