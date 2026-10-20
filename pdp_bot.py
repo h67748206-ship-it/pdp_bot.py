@@ -8,6 +8,13 @@ import discord
 from discord.ext import commands
 from flask import Flask, jsonify
 
+# ---------- Emojis personnalisés ----------
+EMOJI_VERROUILLER = "<:5_flowerblue:1561514309480353964>"
+EMOJI_DEVERROUILLER = "<a:znkshp:1554788348130754581>"
+EMOJI_CACHER = "<:b_Wumpus_Heart:1552978356545265789>"
+EMOJI_AFFICHER = "<a:01_9musik:1553010062761533651>"
+EMOJI_RENOMMER = "✏️"
+
 # ---------- Site web (Render) ----------
 app = Flask(__name__)
 etat = {"nom": "VoiceMaster", "statut": "démarrage..."}
@@ -310,23 +317,23 @@ class Panneau(discord.ui.View):
         await salon.set_permissions(interaction.guild.default_role, **kwargs)
         await interaction.response.send_message(f"{texte} ✅", ephemeral=True)
 
-    @discord.ui.button(label="Verrouiller", emoji="🔒", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Verrouiller", emoji=EMOJI_VERROUILLER, style=discord.ButtonStyle.secondary)
     async def verrouiller(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._modifier(interaction, "Salon verrouillé", connect=False)
 
-    @discord.ui.button(label="Déverrouiller", emoji="🔓", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Déverrouiller", emoji=EMOJI_DEVERROUILLER, style=discord.ButtonStyle.secondary)
     async def deverrouiller(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._modifier(interaction, "Salon déverrouillé", connect=None)
 
-    @discord.ui.button(label="Cacher", emoji="🙈", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Cacher", emoji=EMOJI_CACHER, style=discord.ButtonStyle.secondary)
     async def cacher(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._modifier(interaction, "Salon caché", view_channel=False)
 
-    @discord.ui.button(label="Afficher", emoji="👁️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Afficher", emoji=EMOJI_AFFICHER, style=discord.ButtonStyle.secondary)
     async def afficher(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._modifier(interaction, "Salon affiché", view_channel=None)
 
-    @discord.ui.button(label="Renommer", emoji="✏️", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Renommer", emoji=EMOJI_RENOMMER, style=discord.ButtonStyle.primary)
     async def renommer(self, interaction: discord.Interaction, button: discord.ui.Button):
         salon, erreur = temp_du_clic(interaction)
         if erreur:
@@ -339,7 +346,7 @@ class Panneau(discord.ui.View):
 @requis("panneau")
 async def panneau(ctx):
     embed = discord.Embed(
-        title="Panneau de gestion vocal",
+        title=f"{EMOJI_VERROUILLER} Panneau de gestion vocal",
         description=(
             "Rejoins ton salon vocal temporaire, puis utilise les boutons ci-dessous "
             "pour le gérer."
@@ -352,7 +359,7 @@ async def panneau(ctx):
 @bot.command(name="help")
 async def help_cmd(ctx):
     embed = discord.Embed(
-        title="VoiceMaster · aide",
+        title=f"{EMOJI_CACHER} VoiceMaster · aide",
         description=f"Préfixe : `{data['prefix']}`",
         color=0x33C6FF,
     )
