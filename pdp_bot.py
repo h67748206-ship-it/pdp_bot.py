@@ -14,7 +14,7 @@ etat = {"nom": "VoiceMaster", "statut": "démarrage..."}
 
 COMMANDES = [
     ("Tout le monde", [
-        ("=panneau", "Réafficher le panneau de gestion de ton salon."),
+        ("=panneau", "Afficher le panneau de gestion dans ce salon texte."),
         ("=help", "Afficher cette aide."),
     ]),
     ("Whitelist", [
@@ -270,6 +270,20 @@ async def on_voice_state_update(membre, avant, apres):
 
 
 # ---------- Panneau de gestion ----------
+def temp_du_clic(interaction: discord.Interaction):
+    """Retourne (salon, erreur) : le vocal temporaire où se trouve la personne qui clique."""
+    membre = interaction.user
+    if not membre.voice or not membre.voice.channel:
+        return None, "Rejoins ton salon vocal temporaire pour utiliser le panneau."
+    salon = membre.voice.channel
+    proprio = guilde(interaction.guild.id)["temp"].get(str(salon.id))
+    if proprio is None:
+        return None, "Ce salon n'est pas un vocal temporaire."
+    if proprio != membre.id and not est_owner(membre):
+        return None, "Seul le propriétaire du salon peut faire ça."
+    return salon, None
+
+
 class RenommerModal(discord.ui.Modal, title="Renommer le salon"):
     nom = discord.ui.TextInput(label="Nouveau nom", max_length=100)
 
@@ -286,68 +300,53 @@ class RenommerModal(discord.ui.Modal, title="Renommer le salon"):
 
 
 class Panneau(discord.ui.View):
-    def __init__(self, salon_id: int, proprio_id: int):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.salon_id = salon_id
-        self.proprio_id = proprio_id
 
-    async def verifier(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.proprio_id or est_owner(interaction.user):
-            return True
-        await interaction.response.send_message(
-            "Seul le propriétaire du salon peut faire ça.", ephemeral=True
-        )
-        return False
-
-    async def _modifier(self, interaction, **kwargs):
-        salon = interaction.guild.get_channel(self.salon_id)
-        if salon is None:
-            return await interaction.response.send_message("Salon introuvable.", ephemeral=True)
+    async def _modifier(self, interaction: discord.Interaction, texte: str, **kwargs):
+        salon, erreur = temp_du_clic(interaction)
+        if erreur:
+            return await interaction.response.send_message(erreur, ephemeral=True)
         await salon.set_permissions(interaction.guild.default_role, **kwargs)
-        await interaction.response.send_message("Fait ✅", ephemeral=True)
+        await interaction.response.send_message(f"{texte} ✅", ephemeral=True)
 
     @discord.ui.button(label="Verrouiller", emoji="🔒", style=discord.ButtonStyle.secondary)
     async def verrouiller(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.verifier(interaction):
-            await self._modifier(interaction, connect=False)
+        await self._modifier(interaction, "Salon verrouillé", connect=False)
 
     @discord.ui.button(label="Déverrouiller", emoji="🔓", style=discord.ButtonStyle.secondary)
     async def deverrouiller(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.verifier(interaction):
-            await self._modifier(interaction, connect=None)
+        await self._modifier(interaction, "Salon déverrouillé", connect=None)
 
     @discord.ui.button(label="Cacher", emoji="🙈", style=discord.ButtonStyle.secondary)
     async def cacher(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.verifier(interaction):
-            await self._modifier(interaction, view_channel=False)
+        await self._modifier(interaction, "Salon caché", view_channel=False)
 
     @discord.ui.button(label="Afficher", emoji="👁️", style=discord.ButtonStyle.secondary)
     async def afficher(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.verifier(interaction):
-            await self._modifier(interaction, view_channel=None)
+        await self._modifier(interaction, "Salon affiché", view_channel=None)
 
     @discord.ui.button(label="Renommer", emoji="✏️", style=discord.ButtonStyle.primary)
     async def renommer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.verifier(interaction):
-            await interaction.response.send_modal(RenommerModal(self.salon_id))
+        salon, erreur = temp_du_clic(interaction)
+        if erreur:
+            return await interaction.response.send_message(erreur, ephemeral=True)
+        await interaction.response.send_modal(RenommerModal(salon.id))
 
 
-# ---------- Commande : tout le monde ----------
+# ---------- Commande : panneau (posté dans le salon texte) ----------
 @bot.command(name="panneau")
 @requis("panneau")
 async def panneau(ctx):
-    if not ctx.author.voice or not ctx.author.voice.channel:
-        return await ctx.send("Tu dois être dans un salon vocal.")
-    salon = ctx.author.voice.channel
-    proprio = guilde(ctx.guild.id)["temp"].get(str(salon.id))
-    if proprio is None:
-        return await ctx.send("Ce salon n'est pas un vocal temporaire.")
     embed = discord.Embed(
-        title=f"Panneau de {salon.name}",
-        description=f"Propriétaire : <@{proprio}>",
+        title="Panneau de gestion vocal",
+        description=(
+            "Rejoins ton salon vocal temporaire, puis utilise les boutons ci-dessous "
+            "pour le gérer."
+        ),
         color=0x33C6FF,
     )
-    await ctx.send(embed=embed, view=Panneau(salon.id, proprio))
+    await ctx.send(embed=embed, view=Panneau())
 
 
 @bot.command(name="help")
@@ -437,17 +436,15 @@ async def wakeup(ctx, membre: discord.Member = None):
     origine = membre.voice.channel
     wakeup_en_cours.add(membre.id)
     try:
-        # Visite de tous les salons vocaux du serveur
         for salon in ctx.guild.voice_channels:
             if not membre.voice or not membre.voice.channel:
-                break  # le membre s'est déconnecté
+                break
             try:
                 await membre.move_to(salon)
             except discord.HTTPException:
-                continue  # salon inaccessible : on passe
+                continue
             await asyncio.sleep(DELAI_WAKEUP)
 
-        # Retour au salon d'origine
         if membre.voice and membre.voice.channel:
             retour = ctx.guild.get_channel(origine.id)
             if retour:
