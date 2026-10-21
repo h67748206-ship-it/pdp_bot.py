@@ -40,7 +40,9 @@ COMMANDES = [
     ("Owner", [
         ("=perm", "Panneau des perms (rôles → commandes)."),
         ("=wl @m", "Gérer la whitelist."),
-        ("=owner @m", "Gérer les owners du bot."),
+        ("=owner @m", "Ajouter ou retirer un owner."),
+        ("=unowner @m", "Retirer un owner (ou =unowner all pour tous)."),
+        ("=antimute @m", "Protéger un membre contre le mute et le sourdine serveur."),
         ("=perso", "Personnaliser le bot (avatar, nom, statut)."),
         ("=prefix <nouveau>", "Changer le préfixe du bot."),
     ]),
@@ -140,8 +142,11 @@ wakeup_en_cours: set[int] = set()
 
 def charger() -> dict:
     if DATA_FILE.exists():
-        return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-    return {"prefix": "=", "owners": [], "guilds": {}}
+        d = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    else:
+        d = {"prefix": "=", "owners": [], "guilds": {}}
+    d.setdefault("antimute", [])
+    return d
 
 
 data = charger()
@@ -258,6 +263,22 @@ async def suivre(leader: discord.Member, salon: discord.VoiceChannel):
                 pass
 
 
+async def proteger_contre_mute(membre: discord.Member, avant, apres):
+    """Annule un mute ou un sourdine serveur appliqué sur une personne protégée."""
+    if apres.channel is None:
+        return
+    kwargs = {}
+    if apres.mute and not avant.mute:
+        kwargs["mute"] = False
+    if apres.deaf and not avant.deaf:
+        kwargs["deafen"] = False
+    if kwargs:
+        try:
+            await membre.edit(reason="Anti-mute", **kwargs)
+        except discord.HTTPException:
+            pass
+
+
 @bot.event
 async def on_ready():
     set_status("en ligne")
@@ -268,6 +289,8 @@ async def on_ready():
 async def on_voice_state_update(membre, avant, apres):
     if membre.bot:
         return
+    if membre.id in data["antimute"]:
+        await proteger_contre_mute(membre, avant, apres)
     if avant.channel and avant.channel != apres.channel:
         await nettoyer(avant.channel)
     if apres.channel and apres.channel != avant.channel:
@@ -513,6 +536,43 @@ async def owner(ctx, membre: discord.Member):
     else:
         data["owners"].append(membre.id)
         msg = f"{membre.display_name} est maintenant owner."
+    sauver()
+    await ctx.send(msg)
+
+
+@bot.command(name="unowner")
+@owner_only()
+async def unowner(ctx, *, cible: str = None):
+    if not cible:
+        return await ctx.send("Usage : `=unowner @membre` ou `=unowner all`.")
+    if cible.strip().lower() == "all":
+        total = len(data["owners"])
+        data["owners"].clear()
+        sauver()
+        return await ctx.send(f"{total} owner(s) retiré(s).")
+    if not ctx.message.mentions:
+        return await ctx.send("Mentionne la personne : `=unowner @membre`.")
+    membre = ctx.message.mentions[0]
+    if membre.id in data["owners"]:
+        data["owners"].remove(membre.id)
+        sauver()
+        return await ctx.send(f"{membre.display_name} n'est plus owner.")
+    await ctx.send(f"{membre.display_name} n'est pas owner.")
+
+
+@bot.command(name="antimute")
+@owner_only()
+async def antimute(ctx, membre: discord.Member = None):
+    membre = membre or ctx.author
+    if membre.id in data["antimute"]:
+        data["antimute"].remove(membre.id)
+        msg = f"Protection anti-mute retirée pour {membre.display_name}."
+    else:
+        data["antimute"].append(membre.id)
+        msg = (
+            f"Protection anti-mute activée pour {membre.display_name}. "
+            "Le bot annule automatiquement un mute ou un sourdine serveur."
+        )
     sauver()
     await ctx.send(msg)
 
